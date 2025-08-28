@@ -38,4 +38,4 @@ async def handle_intent(chat_id: str, text: str) -> None:
         escalation="operator",
     )
     reply = await yfm.generate(system, context, text)
-    await send_reply(chat_id, reply)
+    await send_reply(settings, chat_id, reply)
