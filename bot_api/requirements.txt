@@ -1,0 +1,7 @@
+fastapi
+uvicorn[standard]
+httpx
+asyncpg
+qdrant-client
+python-docx
+pydantic
