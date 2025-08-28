@@ -1,63 +1,43 @@
 """Document ingestion utilities."""
-from __future__ import annotations
-
-from pathlib import Path
-from typing import Iterable, List
-
-import asyncio
-
-from docx import Document
-
+from qdrant_client import AsyncQdrantClient, models
 from ..db import pg
 from .yandex_fm import YandexFoundationModel
-from qdrant_client import AsyncQdrantClient, models
 
-CHUNK_MIN = 800
-CHUNK_MAX = 1500
-
-
-def _chunk_text(text: str) -> List[str]:
-    chunks, buf = [], ""
-    for paragraph in text.splitlines():
-        if len(buf) + len(paragraph) > CHUNK_MAX:
-            if len(buf) >= CHUNK_MIN:
-                chunks.append(buf)
-            buf = paragraph
-        else:
-            buf += "\n" + paragraph
-    if buf:
-        chunks.append(buf)
-    return chunks
-
-
-def _load_file(path: Path) -> str:
-    if path.suffix == ".docx":
-        return "\n".join(p.text for p in Document(path).paragraphs)
-    if path.suffix == ".md":
-        return path.read_text(encoding="utf-8")
-    return ""
-
+COLLECTION = "kb"
 
 async def reindex_kb() -> None:
-    """Rebuild knowledge base vectors from stored files."""
-    settings = pg.settings  # assumes settings assigned externally
+    settings = pg.settings
     yfm = YandexFoundationModel(settings.yfm_api_key, settings.yfm_folder_id)
     qdrant = AsyncQdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
-    path = Path(settings.kb_path)
-    texts: List[str] = []
-    for file in path.glob("**/*"):
-        if file.suffix in {".docx", ".md"}:
-            texts.append(_load_file(file))
-    chunks = [c for t in texts for c in _chunk_text(t)]
-    vectors = await yfm.embed(chunks)
-    pool = await pg.get_pool(settings.database_dsn)
-    async with pool.acquire() as conn:
-        await conn.execute("DELETE FROM kb_chunks")
-        for idx, (chunk, vector) in enumerate(zip(chunks, vectors)):
-            await conn.execute(
-                "INSERT INTO kb_chunks(id, content) VALUES ($1, $2)", idx, chunk
-            )
-            await qdrant.upsert(
-                collection_name="kb",
-                points=[models.PointStruct(id=idx, vector=vector, payload={"text": chunk})],
-            )
+
+    # 1) Забираем опубликованные чанки из Django-БД
+    rows = await pg.fetch(
+        """
+        SELECT kc.id, kc.text
+        FROM kb_chunk kc
+        JOIN kb_entry ke ON kc.entry_id = ke.id
+        WHERE ke.is_published = TRUE
+        ORDER BY kc.id
+        """
+    )
+    texts = [r["text"] for r in rows]
+    ids = [int(r["id"]) for r in rows]
+    if not texts:
+        return
+
+    # 2) Эмбеддинги
+    vectors = await yfm.embed(texts)
+    dim = len(vectors[0])
+
+    # 3) Гарантируем коллекцию
+    await qdrant.recreate_collection(
+        collection_name=COLLECTION,
+        vectors_config=models.VectorParams(size=dim, distance=models.Distance.COSINE),
+    )
+
+    # 4) Апсерты
+    points = [
+        models.PointStruct(id=ids[i], vector=vectors[i], payload={"text": texts[i]})
+        for i in range(len(ids))
+    ]
+    await qdrant.upsert(collection_name=COLLECTION, points=points)
