@@ -1,43 +1,37 @@
 """Async client for Yandex Foundation Models."""
+import httpx
 from typing import Iterable, List
 
-import httpx
-
-
 class YandexFoundationModel:
-    """Minimal wrapper around Yandex Foundation Models API."""
-
     def __init__(self, api_key: str, folder_id: str) -> None:
         self._client = httpx.AsyncClient(base_url="https://llm.api.cloud.yandex.net")
-        self._headers = {"Authorization": f"Api-Key {api_key}", "x-folder-id": folder_id}
+        self._headers = {"Authorization": f"Api-Key {api_key}"}
+        self._folder_id = folder_id
+        self._model_uri = f"gpt://{folder_id}/yandexgpt-lite/latest"
+        self._embed_model_uri = f"emb://{folder_id}/text-search/latest"  # пример, подберите под вашу нужду
 
     async def embed(self, texts: Iterable[str]) -> List[List[float]]:
-        """Return embedding vectors for provided texts."""
-        resp = await self._client.post(
-            "/foundationModels/v1/embeddings",
-            json={"texts": list(texts)},
-            headers=self._headers,
-        )
-        resp.raise_for_status()
-        return resp.json().get("vectors", [])
+        vecs: List[List[float]] = []
+        for t in texts:
+            resp = await self._client.post(
+                "/foundationModels/v1/textEmbedding",
+                json={"modelUri": self._embed_model_uri, "text": t},
+                headers=self._headers,
+            )
+            resp.raise_for_status()
+            vecs.append(resp.json()["embedding"])
+        return vecs
 
     async def generate(self, system: str, context: str, user: str) -> str:
-        """Generate completion given system prompt, context and user input."""
         payload = {
-            "model": "yandexgpt-lite",
+            "modelUri": self._model_uri,
+            "completionOptions": {"temperature": 0.3, "maxTokens": "800"},
             "messages": [
                 {"role": "system", "text": system},
-                {"role": "user", "text": f"{context}\n{user}"},
+                {"role": "user", "text": f"{context}\n\nПользователь: {user}"},
             ],
         }
-        resp = await self._client.post(
-            "/foundationModels/v1/completion", json=payload, headers=self._headers
-        )
+        resp = await self._client.post("/foundationModels/v1/completion", json=payload, headers=self._headers)
         resp.raise_for_status()
-        return (
-            resp.json()
-            .get("result", {})
-            .get("alternatives", [{}])[0]
-            .get("message", {})
-            .get("text", "")
-        )
+        alts = resp.json().get("alternatives", [])
+        return (alts[0].get("message", {}) or {}).get("text", "") if alts else ""
