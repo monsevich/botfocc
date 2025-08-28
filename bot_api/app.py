@@ -1,25 +1,29 @@
 """FastAPI entrypoint for bot API."""
 from fastapi import FastAPI, HTTPException, Request
-
-from .settings import Settings
+from .settings import load_settings
 from .security import validate_signature
 from .amocrm_client import parse_incoming, send_reply
 from .rag.ingest import reindex_kb
 from .logic.orchestrator import handle_intent
+from .db import pg
 
 app = FastAPI()
-settings = Settings()
+settings = None
 
+@app.on_event("startup")
+async def startup():
+    global settings
+    settings = load_settings()
+    pg.settings = settings
+    # Инициализируем пул PG (создастся при первом вызове)
+    await pg.get_pool(settings.database_dsn)
 
 @app.get("/health")
-async def health() -> dict[str, str]:
-    """Basic healthcheck."""
+async def health():
     return {"status": "ok"}
 
-
 @app.post("/amo/webhook")
-async def amo_webhook(request: Request) -> dict[str, str]:
-    """Receive amoCRM webhook with signature validation."""
+async def amo_webhook(request: Request):
     body = await request.body()
     signature = request.headers.get("X-Signature", "")
     if not validate_signature(body, signature, settings.amo_secret):
@@ -29,9 +33,7 @@ async def amo_webhook(request: Request) -> dict[str, str]:
     await handle_intent(chat_id, text)
     return {"status": "accepted"}
 
-
 @app.post("/kb/reindex")
-async def kb_reindex() -> dict[str, str]:
-    """Trigger knowledge base reindexing."""
+async def kb_reindex():
     await reindex_kb()
     return {"status": "queued"}
